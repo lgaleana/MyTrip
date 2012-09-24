@@ -1,0 +1,490 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" name="viewport" content="initial-scale=1.0, user-scalable=no">
+	<title>MyTrip</title>
+	<style type="text/css">
+		html { height: 100% }
+		body { height: 100%; margin: 0; padding: 0 }
+		#map { height: 100% }
+    </style>
+    <script type="text/javascript" src="http://maps.googleapis.com/maps/api/js?key=AIzaSyD-J2vNmhqJRrtq2snuPNW4xPpk8D6w4es&libraries=geometry,places&sensor=false"></script>
+    <script>
+    
+    var initialLat = 40.4230; // Latitude of the initial view of the map.
+	var initialLng = -98.7372; // Longitude of the initial view in the map.
+	var map; // The google map.
+	var infowindow; // Pop-up window of the markers.
+	
+	var hundred = 0.000900001; // Supposedly, represents 100m. in degrees (the measure unit of latitude and longtitude).
+	var delta = 3000; // Increase factor;
+	var distanceLimit = 300000; // Distance to determine two points where to look for places (in meters).
+	var degreeIncrement = hundred * delta; // Increment to form the area to look for places (in degrees).
+	
+	var geonamesTimeout = 350; // Time between each call to the geonames server (in milliseconds).
+	var geonamesCallTimeout = 1500; // Time in which the request is aborted and a new one is sent.
+	var placesTimeout = 1000; // Time between each call to the google.places server (in milliseconds).
+	var geonamesMaxRows = 7; // Maximum number of localities to displaye in a geonames call.
+	var placesRadius = 50000; // The radius in which establishments will be looked for (maximum 50000).
+	var userName = "lgaleana"; // User name for the geonames server.
+	
+	var onProcess = false; // Determines if a trip is being processed.
+	var originName; // Name of the starting place.
+	var destinyName; // Name of the destiny place.
+	var initialLatLng; // LatLng of the starting place.
+	var finalLatLng; // LatLng of the destiny place.
+	
+	var localitiesArray = []; // Holds all the localities that will be displayed on the map.
+    
+    function initialize() {
+		var initialPosition = new google.maps.LatLng(initialLat, initialLng);
+    	
+    	map = new google.maps.Map(document.getElementById('map'), {
+    	      mapTypeId: google.maps.MapTypeId.ROADMAP,
+    	      center: initialPosition,
+    	      zoom: 4
+    	      });
+    	
+    	var origin = document.getElementById('origin');
+    	var destiny = document.getElementById('destiny');
+    	var options = {
+    	  types: ['(cities)']
+    	};
+    	var autocompleteOrigin = new google.maps.places.Autocomplete(origin, options);
+    	var autocompleteDestiny = new google.maps.places.Autocomplete(destiny, options);
+    	
+    	infowindow = new google.maps.InfoWindow();
+    }
+    
+    function keyHandler(e) {
+    	if(e.keyCode == 13 && document.getElementById("origin").value != "" && document.getElementById("destiny").value != "")
+    		tripPlanner();
+    }
+    
+    function tripPlanner() {
+    	if(!onProcess) {
+    		originName = document.getElementById("origin").value;
+    		destinyName = document.getElementById("destiny").value;
+    		if(originName != destinyName) {
+    			onProcess = true;
+    			cleanUp();
+    			generateTrip(originName, destinyName);
+    		}
+    	}
+    }
+    
+    function generateTrip(origin, destiny) {
+    	var originGeocoder = new google.maps.Geocoder();
+    	var destinyGeocoder = new google.maps.Geocoder();
+    	
+    	originGeocoder.geocode({'address': origin}, function(originResults, originStatus) {
+    		if (originStatus == google.maps.GeocoderStatus.OK) {
+				initialLatLng = new google.maps.LatLng(originResults[0].geometry.location.lat(), originResults[0].geometry.location.lng());
+    			destinyGeocoder.geocode({'address': destiny}, function(destinyResults, destinyStatus) {
+    				if (destinyStatus == google.maps.GeocoderStatus.OK) {
+    					finalLatLng = new google.maps.LatLng(destinyResults[0].geometry.location.lat(), destinyResults[0].geometry.location.lng());
+    					processRoute(initialLatLng, finalLatLng);
+    				}
+    			});
+    		}
+    	});
+    }
+    
+    function processRoute(originLatLng, destinyLatLng) {
+    	var request = {
+    		origin: originLatLng,
+    		destination: destinyLatLng,
+    		travelMode: google.maps.TravelMode.DRIVING
+  		};
+    	
+    	var directionsService = new google.maps.DirectionsService();
+  		directionsService.route(request, function(result, status) {
+    		if (status == google.maps.DirectionsStatus.OK) {
+    			obtainLocalities(result.routes[0].overview_path, 0, 1);
+    			
+    			// Creates a locality to store its information.
+				var origin = {
+					name: originName,
+					rating: 0.0,
+					funRating: 0.0,
+					cultureRating: 0.0,
+					foodRating: 0.0,
+					nightLifeRating: 0.0,
+					lat: initialLatLng.lat(),
+					lng: initialLatLng.lng(),
+					marker: null,
+					places: [],
+					state: "Unactive"
+				};
+    			
+				localitiesArray.push(origin);
+				createMarker(origin);
+				
+				// Creates a locality to store its information.
+				var destiny = {
+					name: destinyName,
+					rating: 0.0,
+					funRating: 0.0,
+					cultureRating: 0.0,
+					foodRating: 0.0,
+					nightLifeRating: 0.0,
+					lat: finalLatLng.lat(),
+					lng: finalLatLng.lng(),
+					marker: null,
+					places: [],
+					state: "Unactive"
+				};
+    			
+				localitiesArray.push(destiny);
+				createMarker(destiny);
+				
+				searchPlaces([origin, destiny], 0);
+    		}
+  		});
+    }
+    
+    function obtainLocalities(path, origin, i) {
+    	var distance;
+    	
+    	// Looks for the next point where to set the limit of the search area.
+    	i++;
+    	for(i;i<path.length;i++) {
+    		var distance = google.maps.geometry.spherical.computeDistanceBetween(path[origin], path[i]);
+    		if(distance >= distanceLimit)
+    			break;
+    	}
+    	
+    	distance = google.maps.geometry.spherical.computeDistanceBetween(path[i], path[path.length - 1]);
+    	
+    	// Determines how close the path[i] point is to the destiny point to see if it creates an area
+    	// between the origin and path[i] or between the origin and the destiny.
+    	if(distance>distanceLimit) {
+    		callGeonames(path[origin], path[i]);
+			origin = i-1;
+			setTimeout(function() {
+	    		obtainLocalities(path, origin, i++);
+	    	}, geonamesTimeout);
+		} else {
+    		callGeonames(path[origin], path[path.length-1]);
+    		onProcess = false;
+		}
+    }
+    
+    function callGeonames(originLatLng, destinyLatLng) {
+    	var north;
+    	var south;
+    	var east;
+    	var west;
+
+    	if(originLatLng.lat() >= destinyLatLng.lat()) {
+    		north = originLatLng.lat();
+    		south = destinyLatLng.lat();
+    	}
+    	else {
+    		north = destinyLatLng.lat();
+    		south = originLatLng.lat();
+    	}
+    	if(originLatLng.lng() >= destinyLatLng.lng()) {
+    		east = originLatLng.lng();
+    		west = destinyLatLng.lng();
+    	}
+    	else {
+    		east = destinyLatLng.lng();
+    		west = originLatLng.lng();
+    	}
+
+    	if((south + degreeIncrement) > north) {
+	    	var aux = north;
+	    	north = south + degreeIncrement;
+	    	south = aux - degreeIncrement;
+	    }
+	    if((west + degreeIncrement) > east) {
+	    	var aux = east;
+	    	east = west + degreeIncrement;
+	    	west = aux - degreeIncrement;
+	    }
+
+    	//drawRectangle(north, south, east, west);
+
+    	var url = "http://api.geonames.org/citiesJSON?north="+north+"&south="+south+"&east="+east+"&west="+west+"&maxRows="+geonamesMaxRows+"&username="+userName;
+    	sendRequestToGeonames(url);
+    }
+    
+    function sendRequestToGeonames(url) {
+    	var xmlhttp;
+    	if (window.XMLHttpRequest) {
+    		// code for IE7+, Firefox, Chrome, Opera, Safari
+      		xmlhttp = new XMLHttpRequest();
+      	} else {
+      		// code for IE6, IE5
+      		xmlhttp = new ActiveXObject("Microsoft.XMLHTTP");
+      	}
+    	
+    	xmlhttp.open("GET",url,true);
+    	xmlhttp.timeout = geonamesCallTimeout;
+    	xmlhttp.onreadystatechange = function() { handleResponseFromGeonames(url, xmlhttp) };
+    	xmlhttp.send();
+    }
+    
+    function handleResponseFromGeonames(url, xmlhttp) {
+    	//console.log(xmlhttp.readyState);
+    	if (xmlhttp.readyState==4) {
+    		if(xmlhttp.status==200) {
+    			clearTimeout
+				var geonames = xmlhttp.responseText;
+				var obj = JSON.parse(geonames);
+				//console.log(obj.geonames.length);
+				var localities = [];
+				for(i=0;i<obj.geonames.length;i++) {
+					
+					// Creates a locality to store its information.
+					var locality = {
+							name: obj.geonames[i].name,
+							rating: 0.0,
+							funRating: 0.0,
+							cultureRating: 0.0,
+							foodRating: 0.0,
+							nightLifeRating: 0.0,
+							lat: obj.geonames[i].lat,
+							lng: obj.geonames[i].lng,
+							marker: null,
+							places: [],
+							state: "Unactive"
+					};
+		      		
+					localities.push(locality);
+					localitiesArray.push(locality);
+					createMarker(locality);
+				}
+				
+				setTimeout(function() {
+					searchPlaces(localities, 0);
+				}, placesTimeout);
+				
+    		} else if(xmlhttp.status==0) {
+	    		sendRequestToGeonames(url);
+    		}
+    	}
+    }
+    
+    function searchPlaces(localities, i) {
+    	if(i<localities.length) {
+	    	var latLng = new google.maps.LatLng(localities[i].lat, localities[i].lng);
+			var request = {
+					location: latLng,
+					radius: placesRadius,
+	    			/*types: ['amusement_park', 'aquarium', 'art_gallery', 'bakery', 'bar', 'cafe',
+	    			        'campground', 'casino', 'museum', 'night_club', 'restaurant', 'zoo']*/
+	    			types: ['amusement_park', 'bar', 'casino', 'night_club', 'zoo']
+	  		};
+			var service = new google.maps.places.PlacesService(map);
+			//console.log(i);
+	  		service.search(request, function(results, status) {
+	  			console.log(google.maps.places.PlacesServiceStatus.OK);
+	  			if (status == google.maps.places.PlacesServiceStatus.OK)
+	  				displayPLaces(results, localities[i]);
+	  		});
+	  		
+	  		setTimeout(function() {
+	  			searchPlaces(localities, i+1);
+	  		}, placesTimeout);
+    	}
+    }
+    
+    function displayPLaces(results, locality) {
+    	var fun = 0;
+		var culture = 0;
+		var food = 0;
+		var nightLife = 0;
+    	for (var i = 0; i < results.length; i++) {
+    		var typesArray = [];
+    		if(results[i].rating >= 3.5) {
+	    		for(j=0; j<results[i].types.length; j++) {
+	    			if(results[i].types[j] == 'amusement_park' || results[i].types[j] == 'campground' || results[i].types[j] == 'zoo') {
+	    				locality.funRating += results[i].rating;
+	    				fun++;
+	    				if(typesArray.indexOf("Fun") == -1)
+	    					typesArray.push("Fun");
+	    			}
+	    			/*if(results[i].types[j] == 'aquarium' || results[i].types[j] == 'art_gallery' || results[i].types[j] == 'museum') {
+	    				locality.cultureRating += results[i].rating;
+	    				culture++;
+	    				if(typesArray.indexOf("Culture") == -1)
+	    					typesArray.push("Culture");
+	    			}
+	    			if(results[i].types[j] == 'bakery' || results[i].types[j] == 'cafe' || results[i].types[j] == 'restaurant') {
+	    				locality.foodRating += results[i].rating;
+	    				food++;
+	    				if(typesArray.indexOf("Food") == -1)
+	    					typesArray.push("Food");
+	    			}*/
+	    			if(results[i].types[j] == 'bar' || results[i].types[j] == 'casino' || results[i].types[j] == 'night_club') {
+	    				locality.nightLifeRating += results[i].rating;
+	    				nightLife++;
+	    				if(typesArray.indexOf("Night Life") == -1)
+	    					typesArray.push("Night Life");
+	    			}
+	    		}
+	    		
+	    		var place = {
+	    				name: results[i].name,
+	    				rating: results[i].rating,
+	    				lat: results[i].geometry.location.lat(),
+	    				lng: results[i].geometry.location.lng(),
+	    				types: typesArray,
+	    				marker: null
+	    				}
+
+	    		locality.places.push(place);
+	    		createPlaceMarker(place);
+	    	}
+    	}
+    	if(fun>0)
+    		locality.funRating /= fun;
+    	if(culture>0)
+    		locality.cultureRating /= culture;
+    	if(food>0)
+    		locality.foodRating /= food;
+    	if(nightLife>0)
+    		locality.nightLifeRating /= nightLife;
+    	
+    	/*locality.rating += locality.funRating + locality.cultureRating + locality.foodRating + locality.nightLifeRating;
+    	if(locality.rating > 0)
+    		locality.rating /= 4;*/
+    	locality.rating += locality.funRating + locality.nightLifeRating;
+    	if(locality.rating > 0)
+    		locality.rating /= 2;
+    }
+    
+    function createMarker(locality) {
+    	var latLng = new google.maps.LatLng(locality.lat, locality.lng);
+    	
+    	var marker = new google.maps.Marker({
+    		map: map,
+            position: latLng,
+            title: locality.name
+            });
+
+  		locality.marker = marker;
+  		
+  		google.maps.event.addListener(marker, 'click', function() {
+  			if(locality.state == "Unactive") {
+  			
+	  			// Define what is inside the infowindow.
+	  			var content = "<div>" + 
+	  				"<h2>" + locality.name + "</h2>" +
+	  				"<h3>" + (Math.floor(locality.rating * 10) / 10) + "</h3> (" + locality.places.length + " places)" +
+	  				"<dl>" +
+	  				"<dd>Fun: " + (Math.floor(locality.funRating * 10) / 10) + "</dd>" +
+	  				"<dd>Culture: " + (Math.floor(locality.cultureRating * 10) / 10) + "</dd>" +
+	  				"<dd>Food: " + (Math.floor(locality.foodRating * 10) / 10) + "</dd>" +
+	  				"<dd>Night life: " + (Math.floor(locality.nightLifeRating * 10) / 10) + "</dd>" +
+	  				"</dl>" +
+	  				"</div>";
+	  				
+	  			infowindow.setContent(content);
+	            infowindow.open(map, this);
+	            
+	            for(i=0; i<localitiesArray.length; i++) {
+	            	if(localitiesArray[i].name != locality.name) {
+	            		//localitiesArray[i].marker.setVisible(false);
+	            		localitiesArray[i].state = "Unactive";
+	            		for(j=0; j<localitiesArray[i].places.length; j++) {
+	            			localitiesArray[i].places[j].marker.setVisible(false);
+	            		}
+	            	}
+	            }
+	            for(i=0; i<locality.places.length; i++) {
+  					locality.places[i].marker.setVisible(true);
+  				}
+	            
+	            map.setCenter(latLng);
+	            map.setZoom(11);
+	            
+	            locality.state = "Active";
+  			}
+  			else {
+  				infowindow.close();
+  				
+  				for(i=0; i<locality.places.length; i++) {
+  					locality.places[i].marker.setVisible(false);
+  				}
+  				
+  				map.setZoom(5);
+  				
+  				locality.state = "Unactive"
+  			}
+        });
+    }
+    
+    function createPlaceMarker(place) {
+    	var latLng = new google.maps.LatLng(place.lat, place.lng);
+    	
+    	var marker = new google.maps.Marker({
+    		map: map,
+            position: latLng,
+            title: place.name,
+            visible: false
+            });
+
+  		place.marker = marker;
+  		
+  		google.maps.event.addListener(marker, 'click', function() {
+  			
+  			// Define what is inside the infowindow.
+	  		var content = "<div>" + 
+	  			"<h3>" + place.name + "</h3>" +
+	  			"<h4>" + (Math.floor(place.rating * 10) / 10) + "</h4>" +
+	  			"<dl>";
+	  			
+	  		for(j=0; j<place.types.length; j++) {
+	    		if(place.types[j] == "Fun" || place.types[j] == "Culture" || place.types[j] == "Food" || place.types[j] == "Night Life") {
+	    			content += "<dd>" + place.types[j] + ", </dd>";
+	    		}
+	    	}
+	  		
+	  		content += "</dl></div>";
+	  				
+	  		infowindow.setContent(content);
+	        infowindow.open(map, this);
+  			
+  		});
+    }
+    
+    function drawRectangle(north, south, east, west) {
+    	var sw = new google.maps.LatLng(south, west);
+    	var ne = new google.maps.LatLng(north, east);
+    	var bound = new google.maps.LatLngBounds(sw, ne);
+
+    	var rec = new google.maps.Rectangle({
+    	          bounds: bound,
+    	          fillOpacity: 0,
+    	          strokeOpacity: 1.0,
+    	          strokeColor: '#000000',
+    	          strokeWeight: 1,
+    	          map: map
+    	          });
+    }
+    
+    function cleanUp() {
+    	for(i=0; i<localitiesArray.length; i++) {
+    		localitiesArray[i].marker.setMap(null);
+    		for(j=0; j<localitiesArray[i].places.length; j++) {
+    			localitiesArray[i].places[j].marker.setMap(null);
+    		}
+    		localitiesArray[i].places.length = 0;
+    	}
+    	localitiesArray.length = 0;
+    }
+    
+    </script> 
+</head>
+<body onload="initialize()">
+	<div>
+		<input id="origin" type="text" onkeypress="keyHandler(event)" />
+		<input id="destiny" type="text" onkeypress="keyHandler(event)" />
+		<input type="button" value="Trip!" onclick="tripPlanner()" />
+	</div>
+	<div id="map"></div>
+</body>
+</html>
